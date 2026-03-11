@@ -37,4 +37,4 @@ build/
 *.egg-info/
 
 # ── Generated context file ─────────────────────────────────────────
-ai_master_context.txt
+ai_master_context.txtsecrets.toml 
