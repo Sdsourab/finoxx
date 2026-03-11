@@ -1,0 +1,40 @@
+# ── Secrets & local config ──────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# Streamlit secrets (set these in the Streamlit Cloud dashboard instead)
+.streamlit/secrets.toml
+
+# ── Database ─────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Python cache ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# ── IDE / OS ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db
+
+# ── Build / dist ──────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+
+# ── Generated context file ─────────────────────────────────────────
+ai_master_context.txt
