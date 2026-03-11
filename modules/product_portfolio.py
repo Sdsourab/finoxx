@@ -2,6 +2,23 @@
 modules/product_portfolio.py  ·  FinOx Suite
 ==============================================
 Product Portfolio & BCG Matrix Analysis.
+
+FIX (v2.1) — AttributeError: 'list' object has no attribute 'items'
+----------------------------------------------------------------------
+BEFORE:
+    context_data=df[["Product", "BCG", "Revenue",
+                      "Market_Growth_Rate", "Relative_Market_Share"]
+                    ].to_dict(orient="records")
+
+    df.to_dict(orient="records") returns a LIST of dicts.
+    _build_enriched_context() calls context_data.items() — lists have no .items().
+    Result: AttributeError crash every time BCG Matrix loaded.
+
+FIX:
+    Pass a proper flat dict summarising the portfolio instead of the raw records
+    list. This also produces richer, more focused AI context:
+    - Summary KPIs (totals, counts per quadrant) are at the top level.
+    - Per-product detail lines are flattened as individual string entries.
 """
 from __future__ import annotations
 
@@ -88,8 +105,31 @@ class ProductPortfolioModule(BaseModule):
 
                 stars     = df[df["BCG"] == "⭐ Star"]["Product"].tolist()
                 cash_cows = df[df["BCG"] == "🐄 Cash Cow"]["Product"].tolist()
+                q_marks   = df[df["BCG"] == "❓ Question Mark"]["Product"].tolist()
                 dogs      = df[df["BCG"] == "🐕 Dog"]["Product"].tolist()
                 total_rev = df["Revenue"].sum()
+
+                # ── FIX: build flat dict instead of df.to_dict(orient="records") ──
+                # to_dict(orient="records") returns a LIST, which has no .items()
+                # and crashes _build_enriched_context.  Flatten here instead.
+                context_dict: dict = {
+                    "Total Portfolio Revenue":   fmt(total_rev),
+                    "Total Products":            len(df),
+                    "Stars":                     ", ".join(stars) or "None",
+                    "Cash Cows":                 ", ".join(cash_cows) or "None",
+                    "Question Marks":            ", ".join(q_marks) or "None",
+                    "Dogs":                      ", ".join(dogs) or "None",
+                    "Star Revenue":              fmt(df[df["BCG"] == "⭐ Star"]["Revenue"].sum()),
+                    "Cash Cow Revenue":          fmt(df[df["BCG"] == "🐄 Cash Cow"]["Revenue"].sum()),
+                }
+                # Add per-product lines as individual entries (still a flat dict)
+                for _, row in df.iterrows():
+                    key = f"Product — {row['Product']}"
+                    context_dict[key] = (
+                        f"{row['BCG']} | Rev: {fmt(row['Revenue'])} | "
+                        f"Growth: {row['Market_Growth_Rate']:.1f}% | "
+                        f"RMS: {row['Relative_Market_Share']:.2f}x"
+                    )
 
                 self._insight_box(
                     what=(
@@ -102,8 +142,7 @@ class ProductPortfolioModule(BaseModule):
                         "Harvest Cash Cows to fund Question Marks. "
                         f"{'Consider divesting Dogs to free up capital.' if dogs else ''}"
                     ),
-                    context_data=df[["Product", "BCG", "Revenue", "Market_Growth_Rate",
-                                     "Relative_Market_Share"]].to_dict(orient="records"),
+                    context_data=context_dict,
                 )
 
             with tab2:

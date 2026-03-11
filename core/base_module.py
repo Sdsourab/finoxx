@@ -308,9 +308,40 @@ def _safe_pct_change(new: float, old: float) -> str:
         return "N/A"
 
 
-def _classify_risk(metrics: dict) -> tuple[str, str]:
+"""
+PATCH TARGET: core/base_module.py
+==================================
+Apply these two function replacements.
+
+BUG: _build_enriched_context() and _classify_risk() both call
+     context_data.items(), which crashes with:
+       AttributeError: 'list' object has no attribute 'items'
+     when any module passes a list (from df.to_dict(orient='records')).
+
+FIX: Both functions now accept dict | list and handle both gracefully.
+"""
+
+# ── REPLACE _classify_risk (around line 2464 in original) ────────────────────
+
+def _classify_risk(metrics: "dict | list") -> "tuple[str, str]":
+    """
+    Classify risk tier from a metrics dict (or list of dicts).
+    Accepts both dict and list[dict] so modules can pass either format
+    without crashing.
+    """
+    # ── Normalise list → flat dict ────────────────────────────────────────────
+    if isinstance(metrics, list):
+        flat: dict = {}
+        for item in metrics:
+            if isinstance(item, dict):
+                flat.update(item)
+        metrics = flat
+
+    if not isinstance(metrics, dict):
+        return "UNKNOWN", "fnx-risk-amber"
+
     try:
-        def _extract(keys: list[str]) -> float | None:
+        def _extract(keys: list) -> "float | None":
             for k in keys:
                 v = metrics.get(k)
                 if v is not None:
@@ -341,22 +372,47 @@ def _classify_risk(metrics: dict) -> tuple[str, str]:
         return "UNKNOWN", "fnx-risk-amber"
 
 
+# ── REPLACE _build_enriched_context (around line 2497 in original) ───────────
+
 def _build_enriched_context(
     what: str,
     recommendation: str,
-    context_data: dict,
+    context_data: "dict | list",
     risk_tier: str,
     risk_cls: str,
 ) -> str:
+    """
+    Serialise dashboard context to a plain-text string for the AI prompt.
+
+    FIX: Accepts both dict and list[dict] — previously only accepted dict,
+    crashing with AttributeError when modules passed .to_dict(orient='records').
+    """
     lines = [
         f"_Risk Tier: {risk_tier}",
         f"_Analyst Context: {what}",
         f"_Static Rec: {recommendation}",
     ]
-    for k, v in context_data.items():
-        lines.append(f"{k}: {v}")
-    return "\n".join(lines)
 
+    if isinstance(context_data, dict):
+        # Original happy-path: flat key→value pairs
+        for k, v in context_data.items():
+            lines.append(f"{k}: {v}")
+
+    elif isinstance(context_data, list):
+        # Defensive path: list of row-dicts from df.to_dict(orient='records')
+        for i, item in enumerate(context_data):
+            if isinstance(item, dict):
+                lines.append(f"--- Record {i + 1} ---")
+                for k, v in item.items():
+                    lines.append(f"  {k}: {v}")
+            else:
+                lines.append(f"Item {i + 1}: {item}")
+
+    else:
+        # Fallback for any other unexpected type
+        lines.append(f"Context: {context_data}")
+
+    return "\n".join(lines)
 
 # =============================================================================
 # Base Module

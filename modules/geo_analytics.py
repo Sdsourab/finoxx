@@ -2,6 +2,17 @@
 modules/geo_analytics.py  ·  FinOx Suite
 ==========================================
 Advanced Geospatial Intelligence Suite.
+
+FIX (v2.1) — AttributeError: 'list' object has no attribute 'items'
+----------------------------------------------------------------------
+BEFORE:
+    context_data=agg.sort_values("Total_Sales", ascending=False)
+                   .head(5).to_dict(orient="records")
+
+    Returns a LIST of dicts → _build_enriched_context crashes on .items().
+
+FIX:
+    Build a proper flat dict with summary KPIs + per-city detail rows.
 """
 from __future__ import annotations
 
@@ -67,6 +78,27 @@ class GeoAnalyticsModule(BaseModule):
                 st.plotly_chart(fig, use_container_width=True)
 
                 top = agg.loc[agg["Total_Sales"].idxmax()]
+                top5 = agg.sort_values("Total_Sales", ascending=False).head(5)
+
+                # ── FIX: flat dict instead of top5.to_dict(orient="records") ────
+                context_dict: dict = {
+                    "Top City":              str(top["City"]),
+                    "Top City Sales":        fmt(top["Total_Sales"]),
+                    "Top City Transactions": int(top["Transactions"]),
+                    "Top City Region":       str(top["Region"]),
+                    "Total Cities":          len(agg),
+                    "Grand Total Sales":     fmt(agg["Total_Sales"].sum()),
+                    "Total Transactions":    int(agg["Transactions"].sum()),
+                }
+                # Add per-city rows as flat entries (top 5)
+                for rank, (_, row) in enumerate(top5.iterrows(), start=1):
+                    key = f"#{rank} — {row['City']}"
+                    context_dict[key] = (
+                        f"Sales: {fmt(row['Total_Sales'])} | "
+                        f"Txns: {int(row['Transactions'])} | "
+                        f"Region: {row['Region']}"
+                    )
+
                 self._insight_box(
                     what=(
                         f"Top city: **{top['City']}** with {fmt(top['Total_Sales'])} in sales "
@@ -76,7 +108,7 @@ class GeoAnalyticsModule(BaseModule):
                         f"Prioritise inventory and marketing budget in **{top['City']}**. "
                         "Investigate low-performing cities for potential market expansion."
                     ),
-                    context_data=agg.sort_values("Total_Sales", ascending=False).head(5).to_dict(orient="records"),
+                    context_data=context_dict,
                 )
 
             with tab2:

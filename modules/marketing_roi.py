@@ -2,6 +2,17 @@
 modules/marketing_roi.py  ·  FinOx Suite
 ==========================================
 Advanced Marketing Intelligence Suite.
+
+FIX (v2.1) — AttributeError: 'list' object has no attribute 'items'
+----------------------------------------------------------------------
+BEFORE:
+    context_data=df[["Campaign", "ROI", "LTV_CAC", "CAC", "Total_GP"]]
+                   .to_dict(orient="records")
+
+    Returns a LIST of dicts → _build_enriched_context crashes on .items().
+
+FIX:
+    Build a proper flat dict with summary KPIs + per-campaign detail rows.
 """
 from __future__ import annotations
 
@@ -103,6 +114,32 @@ class MarketingROIModule(BaseModule):
                 )
                 best_roi  = df.loc[df["ROI"].idxmax(), "Campaign"] if not df.empty else "N/A"
                 worst_roi = df.loc[df["ROI"].idxmin(), "Campaign"] if not df.empty else "N/A"
+
+                # ── FIX: flat dict instead of df[...].to_dict(orient="records") ─
+                context_dict: dict = {
+                    "Total Campaigns":       len(df),
+                    "Total Spend":           fmt(df["Spend"].sum()),
+                    "Total Gross Profit":    fmt(df["Total_GP"].sum()),
+                    "Total Net Profit":      fmt(df["Net_Profit"].sum()),
+                    "Total New Customers":   f"{df['New_Customers'].sum():,.0f}",
+                    "Best ROI Campaign":     best_roi,
+                    "Best ROI Value":        f"{df['ROI'].max():.1%}",
+                    "Worst ROI Campaign":    worst_roi,
+                    "Worst ROI Value":       f"{df['ROI'].min():.1%}",
+                    "Avg LTV:CAC Ratio":     f"{df['LTV_CAC'].mean():.2f}x",
+                    "Customer LTV":          fmt(df["LTV"].iloc[0]) if not df.empty else "N/A",
+                }
+                # Per-campaign rows as flat entries
+                for _, row in df.iterrows():
+                    key = f"Campaign — {row['Campaign']}"
+                    context_dict[key] = (
+                        f"ROI: {row['ROI']:.1%} | "
+                        f"LTV:CAC: {row['LTV_CAC']:.2f}x | "
+                        f"CAC: {fmt(row['CAC'])} | "
+                        f"GP: {fmt(row['Total_GP'])} | "
+                        f"New Cust: {row['New_Customers']:,.0f}"
+                    )
+
                 self._insight_box(
                     what=(
                         f"Best ROI campaign: **{best_roi}** ({df['ROI'].max():.1%}). "
@@ -115,7 +152,7 @@ class MarketingROIModule(BaseModule):
                         f"Pause **{worst_roi}** if its LTV:CAC ratio is below 1.0. "
                         "Increase content-marketing investment if it shows high ROI at low spend."
                     ),
-                    context_data=df[["Campaign", "ROI", "LTV_CAC", "CAC", "Total_GP"]].to_dict(orient="records"),
+                    context_data=context_dict,
                 )
 
             with tab2:

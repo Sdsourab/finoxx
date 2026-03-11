@@ -2,6 +2,16 @@
 modules/competitor_analysis.py  ·  FinOx Suite
 ================================================
 Competitor Analysis & Market Positioning.
+
+FIX (v2.1) — AttributeError: 'list' object has no attribute 'items'
+----------------------------------------------------------------------
+BEFORE:
+    context_data=df.to_dict(orient="records")
+
+    Returns a LIST of dicts → _build_enriched_context crashes on .items().
+
+FIX:
+    Build a proper flat dict with summary KPIs + per-competitor detail rows.
 """
 from __future__ import annotations
 
@@ -66,6 +76,29 @@ class CompetitorAnalysisModule(BaseModule):
 
                 top_ms = df.loc[df["Market_Share"].idxmax(), "Competitor"]
                 top_qs = df.loc[df["Quality_Score"].idxmax(), "Competitor"]
+
+                # ── FIX: flat dict instead of df.to_dict(orient="records") ──────
+                context_dict: dict = {
+                    "Total Competitors":        len(df),
+                    "Market Share Leader":       top_ms,
+                    "Market Share (Leader)":     f"{df['Market_Share'].max():.0%}",
+                    "Quality Score Leader":      top_qs,
+                    "Quality Score (Leader)":    f"{df['Quality_Score'].max():.1f}/10",
+                    "Avg Price Index":           f"{df['Price_Index'].mean():.0f}",
+                    "Avg Quality Score":         f"{df['Quality_Score'].mean():.1f}",
+                    "Total Market Share Tracked": f"{df['Market_Share'].sum():.0%}",
+                }
+                # Per-competitor rows as flat entries
+                for _, row in df.iterrows():
+                    key = f"Competitor — {row['Competitor']}"
+                    context_dict[key] = (
+                        f"Market Share: {row['Market_Share']:.0%} | "
+                        f"Price Index: {row['Price_Index']:.0f} | "
+                        f"Quality: {row['Quality_Score']:.1f} | "
+                        f"Innovation: {row.get('Innovation', 'N/A')} | "
+                        f"Service: {row.get('Service_Score', 'N/A')}"
+                    )
+
                 self._insight_box(
                     what=(
                         f"Market share leader: **{top_ms}** ({df['Market_Share'].max():.0%}). "
@@ -77,7 +110,7 @@ class CompetitorAnalysisModule(BaseModule):
                         "and distribution. If quality score is below average, invest in "
                         "product improvements before attempting a price increase."
                     ),
-                    context_data=df.to_dict(orient="records"),
+                    context_data=context_dict,
                 )
 
             with tab2:
