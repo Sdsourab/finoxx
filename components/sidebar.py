@@ -106,7 +106,7 @@ class Sidebar:
             "<div style='text-align:center;padding:10px 0 2px'>"
             "<span style='font-size:2.1rem'>📈</span><br>"
             "<span style='font-family:\"Plus Jakarta Sans\",sans-serif;font-size:1.6rem;"
-            f"font-weight:800;color:#FFFFFF;letter-spacing:0.5px'>Finoptiv</span><br>"
+            f"font-weight:800;color:#000000;letter-spacing:0.5px'>FinoxX</span><br>"
             "<span style='font-size:0.68rem;color:#718096;letter-spacing:2.5px;"
             "text-transform:uppercase'>BI · Data Science Suite</span>"
             "</div>",
