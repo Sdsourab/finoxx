@@ -1,24 +1,32 @@
 """
-core/base_module.py  ·  FinOx Suite  (v6.0 — GitHub AI Models)
-===============================================================
+core/base_module.py  ·  FinOx Suite  (v6.1 — Bug-Fixed)
+=========================================================
 Abstract base class for all FinOx feature modules.
 
 AI Integration
 --------------
 Provider : GitHub AI Models  (https://models.inference.ai.azure.com)
 Auth     : GITHUB_PAT from .env or .streamlit/secrets.toml
-SDK      : Uses built-in `urllib` only — zero extra dependencies.
+SDK      : openai package (if installed) → stdlib urllib fallback.
 
 Model waterfall (tries each until one succeeds):
   gpt-4o-mini  →  gpt-4o  →  Phi-3.5-mini-instruct
 
-v6.0 changes
-------------
-• Replaced Gemini / Google AI with GitHub AI Models API entirely.
-• No google-generativeai or google-genai dependency needed.
-• API calls use urllib (stdlib) — no openai package required.
-• AI Insights auto-generate on page load (no button click needed).
-• Params unpacked as direct instance attributes for all 16 modules.
+v6.1 Bug-Fix changelog
+-----------------------
+BUG 1 — AttributeError: 'list' object has no attribute 'items'
+    CAUSE : _classify_risk() and _build_enriched_context() both call
+            context_data.items().  Four modules pass
+            df.to_dict(orient="records") which returns a LIST, not a dict.
+    FIX   : Both functions now accept dict | list.
+            _classify_risk() flattens list→dict before extracting margins.
+            _build_enriched_context() iterates lists record-by-record.
+
+BUG 2 — Static fallback card crashes when context_data is a list
+    CAUSE : The static-mode table generator calls ctx.items() directly
+            without the same guard as _build_enriched_context.
+    FIX   : _insight_box() converts ctx to a flat dict before building
+            the HTML table, regardless of input type.
 """
 from __future__ import annotations
 
@@ -47,7 +55,7 @@ _GITHUB_AI_MODELS   = [
     "gpt-4o",
     "Phi-3.5-mini-instruct",
 ]
-_AI_MAX_TOKENS = 650
+_AI_MAX_TOKENS  = 650
 _AI_TEMPERATURE = 0.22
 
 # ── Session-state keys ────────────────────────────────────────────────────────
@@ -200,14 +208,19 @@ INVIOLABLE RULES:
 def _call_github_ai(api_key: str, prompt: str) -> str:
     """
     Call GitHub AI Models API.
+
     IMPORTANT — Your GitHub account must have Models enabled first:
       1. Go to https://github.com/marketplace/models
       2. Click "Sign up for GitHub Models" and accept the terms
       3. Then come back and click Refresh — your existing token will work
+
+    Strategy:
+      1. Try the openai SDK (GitHub's recommended approach, faster).
+      2. Fall back to stdlib urllib if openai is not installed.
     """
     last_error: Exception | None = None
 
-    # Try openai SDK first (GitHub's recommended approach)
+    # ── Attempt 1: openai SDK (if installed) ─────────────────────────────────
     try:
         from openai import OpenAI
         client = OpenAI(
@@ -230,9 +243,9 @@ def _call_github_ai(api_key: str, prompt: str) -> str:
                     continue
                 _handle_ai_error(e, api_key)
     except ImportError:
-        pass  # openai not installed — use urllib below
+        pass  # openai not installed — fall through to urllib
 
-    # Fallback: urllib (stdlib only)
+    # ── Attempt 2: stdlib urllib (zero extra dependencies) ───────────────────
     last_error = None
     for model in _GITHUB_AI_MODELS:
         payload = json.dumps({
@@ -243,10 +256,12 @@ def _call_github_ai(api_key: str, prompt: str) -> str:
         }).encode("utf-8")
         req = urllib.request.Request(
             _GITHUB_AI_ENDPOINT,
-            data=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            method="POST",
+            data    = payload,
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+            },
+            method = "POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=45) as resp:
@@ -254,8 +269,10 @@ def _call_github_ai(api_key: str, prompt: str) -> str:
                 return body["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
             code = e.code
-            try:    err_body = e.read().decode("utf-8", errors="replace")
-            except: err_body = str(e)
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = str(e)
             if code in (404, 422):
                 last_error = e
                 continue
@@ -280,9 +297,10 @@ def _call_github_ai(api_key: str, prompt: str) -> str:
 
 
 def _handle_ai_error(exc: Exception, api_key: str) -> None:
-    err = str(exc).lower()
+    """Translate openai SDK exceptions into the same error types as the urllib path."""
+    err    = str(exc).lower()
     masked = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
-    if "401" in err or "403" in err or "unauthorized" in err or "forbidden" in err or "authentication" in err:
+    if any(x in err for x in ("401", "403", "unauthorized", "forbidden", "authentication")):
         raise PermissionError(
             f"GitHub Models auth error — Account not activated.\n"
             f"Token: {masked}\n"
@@ -298,56 +316,75 @@ def _handle_ai_error(exc: Exception, api_key: str) -> None:
 # =============================================================================
 
 def _safe_pct_change(new: float, old: float) -> str:
+    """Return formatted percentage change between two values."""
     try:
         if old == 0:
             return "N/A"
         change = (new - old) / abs(old) * 100
-        sign = "+" if change >= 0 else ""
+        sign   = "+" if change >= 0 else ""
         return f"{sign}{change:.1f}%"
     except Exception:
         return "N/A"
 
 
-"""
-PATCH TARGET: core/base_module.py
-==================================
-Apply these two function replacements.
-
-BUG: _build_enriched_context() and _classify_risk() both call
-     context_data.items(), which crashes with:
-       AttributeError: 'list' object has no attribute 'items'
-     when any module passes a list (from df.to_dict(orient='records')).
-
-FIX: Both functions now accept dict | list and handle both gracefully.
-"""
-
-# ── REPLACE _classify_risk (around line 2464 in original) ────────────────────
-
-def _classify_risk(metrics: "dict | list") -> "tuple[str, str]":
+def _normalise_to_dict(data: Any) -> dict:
     """
-    Classify risk tier from a metrics dict (or list of dicts).
-    Accepts both dict and list[dict] so modules can pass either format
-    without crashing.
+    Guarantee that *data* is a plain dict, regardless of what was passed.
+
+    Handles:
+      • dict                 → returned as-is
+      • list[dict]           → merged into a single flat dict (last value wins
+                               on duplicate keys, which is fine for AI context)
+      • list[non-dict items] → {str(i): str(item)} mapping
+      • anything else        → {"context": str(data)}
+
+    This is the single choke-point that prevents the recurring
+    AttributeError: 'list' object has no attribute 'items'
+    that crashed BCG Matrix, Competitor Analysis, Geo Analytics, and
+    Marketing ROI whenever they passed df.to_dict(orient='records').
     """
-    # ── Normalise list → flat dict ────────────────────────────────────────────
-    if isinstance(metrics, list):
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
         flat: dict = {}
-        for item in metrics:
+        for i, item in enumerate(data):
             if isinstance(item, dict):
-                flat.update(item)
-        metrics = flat
+                # Prefix duplicate keys so nothing gets silently overwritten
+                for k, v in item.items():
+                    key = str(k)
+                    if key in flat:
+                        key = f"{k} ({i})"
+                    flat[key] = v
+            else:
+                flat[f"item_{i}"] = str(item)
+        return flat
 
-    if not isinstance(metrics, dict):
-        return "UNKNOWN", "fnx-risk-amber"
+    return {"context": str(data)}
+
+
+def _classify_risk(metrics: Any) -> tuple[str, str]:
+    """
+    Return (risk_tier, css_class) from a metrics dict or list-of-dicts.
+
+    FIX v6.1: Accepts any type — calls _normalise_to_dict() first so that
+    list inputs (from df.to_dict(orient='records')) no longer crash.
+    """
+    safe = _normalise_to_dict(metrics)
 
     try:
-        def _extract(keys: list) -> "float | None":
+        def _extract(keys: list[str]) -> float | None:
             for k in keys:
-                v = metrics.get(k)
+                v = safe.get(k)
                 if v is not None:
                     s = str(v).replace("%", "").replace("\u09f3", "").replace(",", "").strip()
                     try:
                         fv = float(s)
+                        # Normalise: if the original string contained "%" the
+                        # value was already a percentage (e.g. "18.5%") so we
+                        # divide by 100 to get a ratio; otherwise keep as-is
+                        # if it's already a ratio (≤ 1), or divide if it looks
+                        # like it's expressed as a percentage (> 1).
                         return fv / 100 if "%" in str(v) else (fv if abs(fv) <= 1 else fv / 100)
                     except ValueError:
                         pass
@@ -368,51 +405,35 @@ def _classify_risk(metrics: "dict | list") -> "tuple[str, str]":
             return "AMBER", "fnx-risk-amber"
         else:
             return "RED", "fnx-risk-red"
+
     except Exception:
         return "UNKNOWN", "fnx-risk-amber"
 
 
-# ── REPLACE _build_enriched_context (around line 2497 in original) ───────────
-
 def _build_enriched_context(
-    what: str,
+    what:         str,
     recommendation: str,
-    context_data: "dict | list",
-    risk_tier: str,
-    risk_cls: str,
+    context_data: Any,
+    risk_tier:    str,
+    risk_cls:     str,
 ) -> str:
     """
-    Serialise dashboard context to a plain-text string for the AI prompt.
+    Serialise dashboard context to a plain-text prompt string for GitHub AI.
 
-    FIX: Accepts both dict and list[dict] — previously only accepted dict,
-    crashing with AttributeError when modules passed .to_dict(orient='records').
+    FIX v6.1: Accepts dict | list | any type.  Calls _normalise_to_dict()
+    before iterating so that passing a list (from df.to_dict(orient='records'))
+    no longer raises AttributeError: 'list' object has no attribute 'items'.
     """
+    safe  = _normalise_to_dict(context_data)
     lines = [
         f"_Risk Tier: {risk_tier}",
         f"_Analyst Context: {what}",
         f"_Static Rec: {recommendation}",
     ]
-
-    if isinstance(context_data, dict):
-        # Original happy-path: flat key→value pairs
-        for k, v in context_data.items():
-            lines.append(f"{k}: {v}")
-
-    elif isinstance(context_data, list):
-        # Defensive path: list of row-dicts from df.to_dict(orient='records')
-        for i, item in enumerate(context_data):
-            if isinstance(item, dict):
-                lines.append(f"--- Record {i + 1} ---")
-                for k, v in item.items():
-                    lines.append(f"  {k}: {v}")
-            else:
-                lines.append(f"Item {i + 1}: {item}")
-
-    else:
-        # Fallback for any other unexpected type
-        lines.append(f"Context: {context_data}")
-
+    for k, v in safe.items():
+        lines.append(f"{k}: {v}")
     return "\n".join(lines)
+
 
 # =============================================================================
 # Base Module
@@ -461,14 +482,33 @@ class BaseModule(ABC):
         self,
         what:           str,
         recommendation: str,
-        context_data:   dict[str, Any] | None = None,
+        context_data:   Any = None,
     ) -> None:
-        import re
+        """
+        Render the AI-powered (or static fallback) insight card.
+
+        Parameters
+        ----------
+        what : str
+            One-sentence plain-English description of the current data state.
+        recommendation : str
+            One-sentence static recommendation shown when AI is disabled.
+        context_data : dict | list | None
+            Key→value metrics dict fed to GitHub AI.
+            Accepts list[dict] (e.g. df.to_dict(orient='records')) — will be
+            normalised internally; no longer crashes with AttributeError.
+        """
+        import re  # noqa: PLC0415 (local import fine here)
+
         st.markdown(_INSIGHT_CSS, unsafe_allow_html=True)
 
-        ctx = context_data or {}
-        risk_tier, risk_cls = _classify_risk(ctx)
-        ctx_str   = _build_enriched_context(what, recommendation, ctx, risk_tier, risk_cls)
+        ctx = context_data if context_data is not None else {}
+
+        # Normalise to dict once — used in both the AI path and the static table
+        ctx_dict = _normalise_to_dict(ctx)
+
+        risk_tier, risk_cls = _classify_risk(ctx_dict)
+        ctx_str   = _build_enriched_context(what, recommendation, ctx_dict, risk_tier, risk_cls)
         cache_key = hashlib.md5(ctx_str.encode()).hexdigest()
         cache     = st.session_state[_SK_CACHE]
         active    = st.session_state[_SK_ACTIVE]
@@ -532,7 +572,7 @@ class BaseModule(ABC):
                     unsafe_allow_html=True,
                 )
         else:
-            # Static fallback — no GitHub PAT configured
+            # ── Static fallback — no GitHub PAT configured ────────────────────
             st.markdown(
                 "<div class='fnx-insight-title'>"
                 "<span class='label'>📋 Analysis Summary</span>"
@@ -540,12 +580,16 @@ class BaseModule(ABC):
                 "</div>",
                 unsafe_allow_html=True,
             )
-            if ctx:
+            # ctx_dict is already a plain dict — safe to call .items()
+            if ctx_dict:
                 rows = "".join(
                     f"<tr><td>{k}</td><td>{v}</td></tr>"
-                    for k, v in list(ctx.items())[:8]
+                    for k, v in list(ctx_dict.items())[:8]
                 )
-                st.markdown(f"<table class='fnx-ctx-table'>{rows}</table>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<table class='fnx-ctx-table'>{rows}</table>",
+                    unsafe_allow_html=True,
+                )
             st.markdown(
                 f"<p class='fnx-static-label'>Situation</p>"
                 f"<p class='fnx-static-text'>{what}</p>"
@@ -568,7 +612,8 @@ class BaseModule(ABC):
     # =========================================================================
 
     def _render_insight_text(self, text: str) -> None:
-        import re
+        """Convert plain markdown-ish text to styled HTML paragraphs."""
+        import re  # noqa: PLC0415
         paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
         html = "<div class='fnx-insight-body'>"
         for para in paragraphs:
@@ -579,13 +624,14 @@ class BaseModule(ABC):
 
     def _fetch_and_cache(
         self,
-        ai_key: str,
-        ctx_str:    str,
-        cache_key:  str,
-        cache:      dict,
+        ai_key:    str,
+        ctx_str:   str,
+        cache_key: str,
+        cache:     dict,
         *,
         auto: bool = False,
     ) -> None:
+        """Call GitHub AI and store the response in the session-state cache."""
         spinner_msg = (
             "🔄 Data changed — refreshing AI analysis automatically…"
             if auto
@@ -617,7 +663,10 @@ class BaseModule(ABC):
             except RuntimeError as exc:
                 exc_msg = str(exc)
                 if "429" in exc_msg or "rate limit" in exc_msg.lower():
-                    st.error("⚠️ **Rate Limit** — GitHub AI quota reached. Wait a moment then click **Refresh**.")
+                    st.error(
+                        "⚠️ **Rate Limit** — GitHub AI quota reached. "
+                        "Wait a moment then click **Refresh**."
+                    )
                 else:
                     st.error(f"⚠️ **GitHub AI Error**: {exc_msg}")
 
@@ -629,6 +678,7 @@ class BaseModule(ABC):
     # =========================================================================
 
     def _page_header(self, title: str | None = None, subtitle: str | None = None) -> None:
+        """Render the standardised module page header."""
         _TEAL_H = "#00C2B2"
         _NAVY_H = "#0B1F3A"
         display = title or f"{self.PAGE_ICON} {self.PAGE_TITLE}"
@@ -658,6 +708,7 @@ class BaseModule(ABC):
         st.info(f"ℹ️ {message}")
 
     def _require_columns(self, df: Any, required: list[str]) -> bool:
+        """Return True if all required columns are present; else show error and return False."""
         missing = [c for c in required if c not in df.columns]
         if missing:
             self._error_box(f"Missing columns: {', '.join(missing)}")
