@@ -56,6 +56,58 @@ except ImportError:
     _SKLEARN_OK = False
 
 
+# ── Smart zoom: Mercator bounding-box → ideal zoom level ─────────────────────
+
+def _smart_zoom(lats: pd.Series, lons: pd.Series, pad: float = 0.18) -> float:
+    """
+    Calculates the optimal pydeck/Mapbox zoom so ALL data points fit the
+    viewport without clipping.  Uses the Web Mercator tile formula.
+    pad = fractional padding around the bounding box.
+    """
+    if len(lats) <= 1:
+        return 7.0
+    lat_min, lat_max = lats.min(), lats.max()
+    lon_rng = max(lons.max() - lons.min(), 0.01) * (1 + pad)
+
+    def _lat2tile(lat: float) -> float:
+        rad = math.radians(max(-85.0, min(85.0, lat)))
+        return math.log(math.tan(math.pi / 4 + rad / 2))
+
+    lat_tile = abs(_lat2tile(lat_max) - _lat2tile(lat_min)) * (1 + pad)
+    lon_tile = math.radians(lon_rng)
+
+    z_lat = math.log2(math.pi / lat_tile)       if lat_tile > 0 else 8.0
+    z_lon = math.log2(2 * math.pi / lon_tile)   if lon_tile > 0 else 8.0
+    return round(max(2.0, min(min(z_lat, z_lon), 13.0)), 2)
+
+
+# ── Plasma 6-stop colour ramp for HexagonLayer ────────────────────────────────
+_PLASMA_6 = [
+    [13,  8,   135, 220],
+    [84,  2,   163, 220],
+    [139, 10,  165, 220],
+    [185, 50,  137, 220],
+    [219, 92,  104, 220],
+    [244, 136, 73,  220],
+]
+
+# ── Gradient legend (rendered under the map) ──────────────────────────────────
+_HEX_LEGEND = """
+<div style="margin-top:6px">
+  <span style="font-size:11px;color:#888">📊 Sales Volume Scale</span>
+  <div style="
+    background:linear-gradient(to right,
+      rgba(13,8,135,.9),rgba(84,2,163,.9),rgba(139,10,165,.9),
+      rgba(185,50,137,.9),rgba(219,92,104,.9),rgba(244,136,73,.9));
+    border-radius:5px;height:12px;margin:4px 0 2px">
+  </div>
+  <div style="display:flex;justify-content:space-between;
+              font-size:10px;color:#999">
+    <span>Low</span><span>High</span>
+  </div>
+</div>
+"""
+
 # ── Colour palette for K-Means zones ─────────────────────────────────────────
 _ZONE_COLOURS: dict[str, str] = {
     "🥇 Golden Zone":   "#FFD700",
@@ -533,82 +585,204 @@ class GeoAnalyticsModule(BaseModule):
     # Tab renderers
     # =========================================================================
 
-    # ── Tab 1: 3-D Hexagon Map ─────────────────────────────────────────────────
+    # ── Tab 1: 3-D Advanced Live Map ──────────────────────────────────────────
 
     def _tab_3d_hex(self, agg: pd.DataFrame) -> None:
         """
-        3-D HexagonLayer via pydeck with a 55° pitch.
-        Falls back to px.scatter_mapbox if pydeck is not installed.
+        Advanced 3-D geospatial map.
+        • Smart auto-zoom   — bounding-box Mercator formula; never clips data
+        • 4 pydeck layers   — HexagonLayer + ScatterplotLayer + TextLayer + ArcLayer
+        • Live controls     — pitch / bearing / radius / elevation (real-time)
+        • Layer toggles     — turn layers on/off via checkboxes
+        • CARTO base map    — zero Mapbox token required (works on Streamlit Cloud)
+        • Rich HTML tooltip — glass-morphism dark card with city stats
+        • Gradient legend   — plasma ramp shown below the map
+        • KPI strip v2      — 5 columns with delta vs avg
         """
-        st.subheader("🧊 3D Hexagon Sales Map")
+        st.subheader("🧊 3D Live Geospatial Intelligence Map")
 
+        # ── Fallback: pydeck not installed ───────────────────────────────────
         if not _PYDECK_OK:
             st.info(
-                "pydeck not installed — showing 2-D scatter fallback. "
+                "**pydeck** not installed — showing interactive 2-D fallback. "
                 "Run `pip install pydeck` for the full 3-D experience."
             )
             fig = px.scatter_mapbox(
                 agg,
-                lat="Latitude",
-                lon="Longitude",
-                size="Total_Sales",
-                color="Total_Sales",
+                lat="Latitude", lon="Longitude",
+                size="Total_Sales", color="Total_Sales",
                 hover_name="City",
+                hover_data={"Total_Sales": ":,.0f", "Total_Txns": True},
                 color_continuous_scale="Plasma",
-                zoom=5,
-                height=520,
+                zoom=_smart_zoom(agg["Latitude"], agg["Longitude"]),
+                height=540,
                 mapbox_style="carto-positron",
             )
+            fig.update_layout(margin=dict(r=0, t=0, l=0, b=0))
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            # Build pydeck map data — pydeck expects "lon"/"lat" column names
-            map_data = agg[["Longitude", "Latitude", "Total_Sales", "Total_Txns"]].rename(
-                columns={"Longitude": "lon", "Latitude": "lat"}
-            )
+            self._kpi_strip(agg)
+            return
 
-            layer = pdk.Layer(
+        # ── Live controls (sliders) ───────────────────────────────────────────
+        with st.expander("🎛️ Map Controls — adjust in real-time", expanded=True):
+            ca, cb, cc, cd = st.columns(4)
+            pitch      = ca.slider("🔭 Pitch",            0,   75,  52,       key="hex_pitch")
+            bearing    = cb.slider("🧭 Bearing",        -180,  180, -12,       key="hex_bearing")
+            hex_radius = cc.slider("⬡ Hex Radius (m)", 2_000, 60_000, 14_000,
+                                   step=1_000,                                  key="hex_radius")
+            elev_scale = cd.slider("📈 Elevation",      0.00005, 0.001, 0.0002,
+                                   step=0.00005, format="%.5f",                 key="hex_elev")
+
+        # ── Layer toggles ─────────────────────────────────────────────────────
+        with st.expander("🔲 Layer Visibility", expanded=False):
+            l1, l2, l3, l4 = st.columns(4)
+            show_hex     = l1.checkbox("⬡ Hexagon Towers", value=True,  key="lyr_hex")
+            show_scatter = l2.checkbox("🔵 City Dots",      value=True,  key="lyr_scatter")
+            show_text    = l3.checkbox("🏷️ City Labels",    value=True,  key="lyr_text")
+            show_arcs    = l4.checkbox("⚡ Arc Links",      value=False, key="lyr_arcs")
+
+        # ── Prepare DataFrame for pydeck ──────────────────────────────────────
+        df = agg.copy().rename(columns={"Longitude": "lon", "Latitude": "lat"})
+        s_max           = df["Total_Sales"].max() or 1
+        df["_norm"]     = (df["Total_Sales"] / s_max * 255).astype(int)
+        df["_dot_r"]    = (3_000 + df["Total_Sales"] / s_max * 18_000).astype(int)
+        df["_sales_str"]= df["Total_Sales"].apply(lambda x: f"৳{x:,.0f}")
+        df["_txn_str"]  = df["Total_Txns"].apply(lambda x: f"{int(x):,}")
+        df["_zone"]     = df.get("Zone", pd.Series("—", index=df.index))
+
+        # ── Arc source: top city → all others ────────────────────────────────
+        top_idx         = df["Total_Sales"].idxmax()
+        arc_df          = df[df.index != top_idx].copy()
+        arc_df["s_lat"] = df.loc[top_idx, "lat"]
+        arc_df["s_lon"] = df.loc[top_idx, "lon"]
+
+        # ── Build layers ──────────────────────────────────────────────────────
+        layers = []
+
+        if show_hex:
+            layers.append(pdk.Layer(
                 "HexagonLayer",
-                data=map_data,
+                data=df[["lon", "lat", "Total_Sales", "Total_Txns"]],
                 get_position=["lon", "lat"],
                 get_elevation="Total_Sales",
-                elevation_scale=0.0002,
-                elevation_range=[0, 5000],
-                radius=15_000,
+                elevation_scale=elev_scale,
+                elevation_range=[0, 6_000],
+                radius=hex_radius,
+                coverage=0.85,
                 pickable=True,
                 extruded=True,
-                color_range=[
-                    [26,  152, 80,  200],   # dark green  (low)
-                    [102, 189, 99,  200],
-                    [217, 239, 139, 200],
-                    [254, 224, 139, 200],
-                    [252, 141, 89,  200],
-                    [215, 48,  39,  200],   # dark red    (high)
-                ],
-            )
+                color_range=_PLASMA_6,
+            ))
 
-            view = pdk.ViewState(
-                latitude=agg["Latitude"].mean(),
-                longitude=agg["Longitude"].mean(),
-                zoom=6,
-                pitch=55,
-                bearing=-10,
-            )
+        if show_scatter:
+            layers.append(pdk.Layer(
+                "ScatterplotLayer",
+                data=df,
+                get_position=["lon", "lat"],
+                get_radius="_dot_r",
+                get_fill_color=["_norm", "255 - _norm", 200, 210],
+                get_line_color=[255, 255, 255, 130],
+                line_width_min_pixels=1,
+                stroked=True,
+                filled=True,
+                pickable=True,
+                auto_highlight=True,
+            ))
 
-            deck = pdk.Deck(
-                layers=[layer],
-                initial_view_state=view,
-                map_style="mapbox://styles/mapbox/dark-v9",
-                tooltip={"text": "Sales: {elevationValue}"},
-            )
-            st.pydeck_chart(deck, use_container_width=True)
+        if show_text:
+            layers.append(pdk.Layer(
+                "TextLayer",
+                data=df,
+                get_position=["lon", "lat"],
+                get_text="City",
+                get_size=13,
+                get_color=[255, 255, 255, 230],
+                get_background_color=[20, 20, 45, 170],
+                background_padding=[3, 2, 3, 2],
+                get_anchor="'middle'",
+                get_alignment_baseline="'bottom'",
+                billboard=True,
+                pickable=False,
+            ))
 
-        # KPI strip beneath the map
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Cities Mapped",      f"{len(agg):,}")
-        c2.metric("Total Sales",         fmt(agg["Total_Sales"].sum()))
-        c3.metric("Total Transactions",  f"{int(agg['Total_Txns'].sum()):,}")
-        top = agg.loc[agg["Total_Sales"].idxmax()]
-        c4.metric("Top City",            str(top["City"]))
+        if show_arcs and not arc_df.empty:
+            layers.append(pdk.Layer(
+                "ArcLayer",
+                data=arc_df,
+                get_source_position=["s_lon", "s_lat"],
+                get_target_position=["lon", "lat"],
+                get_source_color=[244, 136, 73, 210],
+                get_target_color=[84, 2, 163, 210],
+                get_width=2,
+                pickable=False,
+                great_circle=True,
+            ))
+
+        # ── ViewState with smart auto-zoom ────────────────────────────────────
+        view = pdk.ViewState(
+            latitude=(df["lat"].min()  + df["lat"].max())  / 2,
+            longitude=(df["lon"].min() + df["lon"].max()) / 2,
+            zoom=_smart_zoom(df["lat"], df["lon"]),
+            pitch=pitch,
+            bearing=bearing,
+            transition_duration=500,
+        )
+
+        # ── Rich HTML tooltip ─────────────────────────────────────────────────
+        tooltip = {
+            "html": """
+            <div style="
+                font-family:Inter,sans-serif;
+                background:rgba(12,12,28,0.93);
+                border:1px solid rgba(255,255,255,0.13);
+                border-radius:10px;padding:11px 15px;
+                min-width:190px;backdrop-filter:blur(8px)">
+              <b style="color:#F8D66D;font-size:14px">{City}</b><br>
+              <span style="color:#888;font-size:11px">{_zone}</span>
+              <hr style="border:none;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+              <span style="color:#7DF9AA">💰 Sales &nbsp;</span>
+              <b style="color:#fff">{_sales_str}</b><br>
+              <span style="color:#7DF9AA">📦 Txns &nbsp;&nbsp;</span>
+              <b style="color:#fff">{_txn_str}</b>
+            </div>""",
+            "style": {"background": "transparent", "border": "none", "padding": "0"},
+        }
+
+        # ── Render ────────────────────────────────────────────────────────────
+        deck = pdk.Deck(
+            layers=layers,
+            initial_view_state=view,
+            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+            map_provider="carto",
+            tooltip=tooltip,
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=580)
+
+        # ── Colour legend ─────────────────────────────────────────────────────
+        st.markdown(_HEX_LEGEND, unsafe_allow_html=True)
+        st.divider()
+
+        # ── KPI strip v2 ──────────────────────────────────────────────────────
+        self._kpi_strip(agg)
+
+    # ── Shared KPI strip (used by 3D map) ─────────────────────────────────────
+
+    def _kpi_strip(self, agg: pd.DataFrame) -> None:
+        """5-column KPI strip with delta vs avg and top/bottom city callouts."""
+        total_sales = agg["Total_Sales"].sum()
+        avg_sales   = total_sales / len(agg) if len(agg) else 0
+        top_row     = agg.loc[agg["Total_Sales"].idxmax()]
+        bot_row     = agg.loc[agg["Total_Sales"].idxmin()]
+        top_delta   = (top_row["Total_Sales"] - avg_sales) / avg_sales * 100 if avg_sales else 0
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("🗺️ Cities",         f"{len(agg):,}")
+        c2.metric("💰 Total Sales",     fmt(total_sales))
+        c3.metric("📦 Transactions",    f"{int(agg['Total_Txns'].sum()):,}")
+        c4.metric("🥇 Top City",        str(top_row["City"]),
+                  delta=f"+{top_delta:.1f}% vs avg")
+        c5.metric("📍 Avg / City",      fmt(avg_sales),
+                  delta=f"Lowest: {bot_row['City']}", delta_color="inverse")
 
     # ── Tab 2: Density Heatmap ─────────────────────────────────────────────────
 
